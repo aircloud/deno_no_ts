@@ -3,7 +3,7 @@
 use crate::ast;
 use crate::ast::parse;
 use crate::ast::transpile_module;
-use crate::ast::BundleHook;
+
 use crate::ast::Location;
 use crate::ast::ParsedModule;
 use crate::colors;
@@ -21,10 +21,7 @@ use crate::specifier_handler::DependencyMap;
 use crate::specifier_handler::Emit;
 use crate::specifier_handler::FetchFuture;
 use crate::specifier_handler::SpecifierHandler;
-use crate::tsc;
-use crate::tsc_config::IgnoredCompilerOptions;
-use crate::tsc_config::TsConfig;
-use crate::version;
+
 use deno_core::error::AnyError;
 
 use deno_core::error::anyhow;
@@ -36,7 +33,7 @@ use deno_core::serde::Deserialize;
 use deno_core::serde::Deserializer;
 use deno_core::serde::Serialize;
 use deno_core::serde::Serializer;
-use deno_core::serde_json::json;
+
 use deno_core::serde_json::Value;
 use deno_core::ModuleResolutionError;
 use deno_core::ModuleSource;
@@ -51,7 +48,7 @@ use std::rc::Rc;
 use std::result;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Instant;
+
 
 lazy_static! {
   /// Matched the `@deno-types` pragma.
@@ -126,22 +123,6 @@ struct BundleLoader<'a> {
   graph: &'a Graph,
 }
 
-impl<'a> BundleLoader<'a> {
-  pub fn new(
-    graph: &'a Graph,
-    emit_options: &'a ast::EmitOptions,
-    globals: &'a swc_common::Globals,
-    cm: Rc<swc_common::SourceMap>,
-  ) -> Self {
-    BundleLoader {
-      cm,
-      emit_options,
-      globals,
-      graph,
-    }
-  }
-}
-
 impl swc_bundler::Load for BundleLoader<'_> {
   fn load(
     &self,
@@ -181,31 +162,6 @@ impl swc_bundler::Load for BundleLoader<'_> {
   }
 }
 
-/// An enum which represents the parsed out values of references in source code.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum TypeScriptReference {
-  Path(String),
-  Types(String),
-}
-
-/// Determine if a comment contains a triple slash reference and optionally
-/// return its kind and value.
-pub fn parse_ts_reference(comment: &str) -> Option<TypeScriptReference> {
-  if !TRIPLE_SLASH_REFERENCE_RE.is_match(comment) {
-    None
-  } else if let Some(captures) = PATH_REFERENCE_RE.captures(comment) {
-    Some(TypeScriptReference::Path(
-      captures.get(1).unwrap().as_str().to_string(),
-    ))
-  } else if let Some(captures) = TYPES_REFERENCE_RE.captures(comment) {
-    Some(TypeScriptReference::Types(
-      captures.get(1).unwrap().as_str().to_string(),
-    ))
-  } else {
-    None
-  }
-}
-
 /// Determine if a comment contains a `@deno-types` pragma and optionally return
 /// its value.
 pub fn parse_deno_types(comment: &str) -> Option<String> {
@@ -220,13 +176,6 @@ pub fn parse_deno_types(comment: &str) -> Option<String> {
   } else {
     None
   }
-}
-
-/// A hashing function that takes the source code, version and optionally a
-/// user provided config and generates a string hash which can be stored to
-/// determine if the cached emit is valid or not.
-fn get_version(source: &str, version: &str, config: &[u8]) -> String {
-  crate::checksum::gen(&[source.as_bytes(), version.as_bytes(), config])
 }
 
 /// A logical representation of a module within a graph.
@@ -314,16 +263,6 @@ impl Module {
     module
   }
 
-  /// Return `true` if the current hash of the module matches the stored
-  /// version.
-  pub fn is_emit_valid(&self, config: &[u8]) -> bool {
-    if let Some(version) = self.maybe_version.clone() {
-      version == get_version(&self.source, &version::deno(), config)
-    } else {
-      false
-    }
-  }
-
   /// Parse a module, populating the structure with data retrieved from the
   /// source of the module.
   pub fn parse(&mut self) -> Result<ParsedModule, AnyError> {
@@ -331,39 +270,8 @@ impl Module {
       parse(self.specifier.as_str(), &self.source, &self.media_type)?;
 
     // parse out any triple slash references
-    for comment in parsed_module.get_leading_comments().iter() {
-      if let Some(ts_reference) = parse_ts_reference(&comment.text) {
-        let location = parsed_module.get_location(&comment.span);
-        match ts_reference {
-          TypeScriptReference::Path(import) => {
-            let specifier =
-              self.resolve_import(&import, Some(location.clone()))?;
-            let dep = self
-              .dependencies
-              .entry(import)
-              .or_insert_with(|| Dependency::new(location));
-            dep.maybe_code = Some(specifier);
-          }
-          TypeScriptReference::Types(import) => {
-            let specifier =
-              self.resolve_import(&import, Some(location.clone()))?;
-            if self.media_type == MediaType::JavaScript
-              || self.media_type == MediaType::JSX
-            {
-              // TODO(kitsonk) we need to specifically update the cache when
-              // this value changes
-              self.maybe_types = Some((import.clone(), specifier));
-            } else {
-              let dep = self
-                .dependencies
-                .entry(import)
-                .or_insert_with(|| Dependency::new(location));
-              dep.maybe_type = Some(specifier);
-            }
-          }
-        }
-      }
-    }
+    // ignore: /// <reference path="..." />
+    // https://www.typescriptlang.org/docs/handbook/triple-slash-directives.html
 
     // Parse out all the syntactical dependencies for a module
     let dependencies = parsed_module.analyze_dependencies();
@@ -480,16 +388,6 @@ impl Module {
     Ok(specifier)
   }
 
-  pub fn set_emit(&mut self, code: String, maybe_map: Option<String>) {
-    self.maybe_emit = Some(Emit::Cli((code, maybe_map)));
-  }
-
-  /// Calculate the hashed version of the module and update the `maybe_version`.
-  pub fn set_version(&mut self, config: &[u8]) {
-    self.maybe_version =
-      Some(get_version(&self.source, &version::deno(), config))
-  }
-
   pub fn size(&self) -> usize {
     self.source.as_bytes().len()
   }
@@ -539,7 +437,7 @@ pub struct ResultInfo {
     HashMap<ModuleSpecifier, Result<ModuleSource, AnyError>>,
   /// Optionally ignored compiler options that represent any options that were
   /// ignored if there was a user provided configuration.
-  pub maybe_ignored_options: Option<IgnoredCompilerOptions>,
+  // pub maybe_ignored_options: Option<IgnoredCompilerOptions>,
   /// A structure providing key metrics around the operation performed, in
   /// milliseconds.
   pub stats: Stats,
@@ -612,6 +510,7 @@ pub struct CheckOptions {
 pub enum BundleType {
   /// Return the emitted contents of the program as a single "flattened" ES
   /// module.
+  #[allow(warnings)]
   Esm,
   // TODO(@kitsonk) once available in swc
   // Iife,
@@ -756,418 +655,46 @@ impl Graph {
     }
   }
 
-  /// Transform the module graph into a single JavaScript module which is
-  /// returned as a `String` in the result.
-  pub fn bundle(
-    &self,
-    options: BundleOptions,
-  ) -> Result<(String, Stats, Option<IgnoredCompilerOptions>), AnyError> {
-    if self.roots.is_empty() || self.roots.len() > 1 {
-      return Err(GraphError::NotSupported(format!("Bundling is only supported when there is a single root module in the graph.  Found: {}", self.roots.len())).into());
-    }
-
-    let start = Instant::now();
-    let root_specifier = self.roots[0].clone();
-    let mut ts_config = TsConfig::new(json!({
-      "checkJs": false,
-      "emitDecoratorMetadata": false,
-      "inlineSourceMap": true,
-      "jsx": "react",
-      "jsxFactory": "React.createElement",
-      "jsxFragmentFactory": "React.Fragment",
-    }));
-    let maybe_ignored_options =
-      ts_config.merge_tsconfig(options.maybe_config_path)?;
-
-    let s = self.emit_bundle(&root_specifier, &ts_config.into())?;
-    let stats = Stats(vec![
-      ("Files".to_string(), self.modules.len() as u32),
-      ("Total time".to_string(), start.elapsed().as_millis() as u32),
-    ]);
-
-    Ok((s, stats, maybe_ignored_options))
-  }
-
   /// Type check the module graph, corresponding to the options provided.
-  pub fn check(self, options: CheckOptions) -> Result<ResultInfo, AnyError> {
-    let mut config = TsConfig::new(json!({
-      "allowJs": true,
-      // TODO(@kitsonk) is this really needed?
-      "esModuleInterop": true,
-      // Enabled by default to align to transpile/swc defaults
-      "experimentalDecorators": true,
-      "incremental": true,
-      "isolatedModules": true,
-      "lib": options.lib,
-      "module": "esnext",
-      "strict": true,
-      "target": "esnext",
-      "tsBuildInfoFile": "deno:///.tsbuildinfo",
-    }));
-    if options.emit {
-      config.merge(&json!({
-        // TODO(@kitsonk) consider enabling this by default
-        //   see: https://github.com/denoland/deno/issues/7732
-        "emitDecoratorMetadata": false,
-        "jsx": "react",
-        "inlineSourceMap": true,
-        "outDir": "deno://",
-        "removeComments": true,
-      }));
-    } else {
-      config.merge(&json!({
-        "noEmit": true,
-      }));
-    }
-    let maybe_ignored_options =
-      config.merge_tsconfig(options.maybe_config_path)?;
+  pub fn check(self, _options: CheckOptions) -> Result<ResultInfo, AnyError> {
+    // let mut config = TsConfig::new(json!({
+    //   "allowJs": true,
+    //   // TODO(@kitsonk) is this really needed?
+    //   "esModuleInterop": true,
+    //   // Enabled by default to align to transpile/swc defaults
+    //   "experimentalDecorators": true,
+    //   "incremental": true,
+    //   "isolatedModules": true,
+    //   "lib": options.lib,
+    //   "module": "esnext",
+    //   "strict": true,
+    //   "target": "esnext",
+    //   "tsBuildInfoFile": "deno:///.tsbuildinfo",
+    // }));
+    // if options.emit {
+    //   config.merge(&json!({
+    //     // TODO(@kitsonk) consider enabling this by default
+    //     //   see: https://github.com/denoland/deno/issues/7732
+    //     "emitDecoratorMetadata": false,
+    //     "jsx": "react",
+    //     "inlineSourceMap": true,
+    //     "outDir": "deno://",
+    //     "removeComments": true,
+    //   }));
+    // } else {
+    //   config.merge(&json!({
+    //     "noEmit": true,
+    //   }));
+    // }
+    // TODO: to be deleted
+    // let maybe_ignored_options =
+    //   config.merge_tsconfig(options.maybe_config_path)?;
 
-    // Short circuit if none of the modules require an emit, or all of the
-    // modules that require an emit have a valid emit.  There is also an edge
-    // case where there are multiple imports of a dynamic module during a
-    // single invocation, if that is the case, even if there is a reload, we
-    // will simply look at if the emit is invalid, to avoid two checks for the
-    // same programme.
-    if !self.needs_emit(&config)
-      || (self.is_emit_valid(&config)
-        && (!options.reload || self.roots_dynamic))
-    {
-      debug!("graph does not need to be checked or emitted.");
-      return Ok(ResultInfo {
-        maybe_ignored_options,
-        loadable_modules: self.get_loadable_modules(),
-        ..Default::default()
-      });
-    }
-
-    // TODO(@kitsonk) not totally happy with this here, but this is the first
-    // point where we know we are actually going to check the program.  If we
-    // moved it out of here, we wouldn't know until after the check has already
-    // happened, which isn't informative to the users.
-    for specifier in &self.roots {
-      info!("{} {}", colors::green("Check"), specifier);
-    }
-
-    let root_names = self.get_root_names(!config.get_check_js());
-    let maybe_tsbuildinfo = self.maybe_tsbuildinfo.clone();
-    let hash_data =
-      vec![config.as_bytes(), version::deno().as_bytes().to_owned()];
-    let graph = Arc::new(Mutex::new(self));
-
-    let response = tsc::exec(tsc::Request {
-      config: config.clone(),
-      debug: options.debug,
-      graph: graph.clone(),
-      hash_data,
-      maybe_tsbuildinfo,
-      root_names,
-    })?;
-
-    let mut graph = graph.lock().unwrap();
-    graph.maybe_tsbuildinfo = response.maybe_tsbuildinfo;
-    // Only process changes to the graph if there are no diagnostics and there
-    // were files emitted.
-    if response.diagnostics.is_empty() {
-      if !response.emitted_files.is_empty() {
-        let mut codes = HashMap::new();
-        let mut maps = HashMap::new();
-        let check_js = config.get_check_js();
-        for emit in &response.emitted_files {
-          if let Some(specifiers) = &emit.maybe_specifiers {
-            assert!(specifiers.len() == 1, "Unexpected specifier length");
-            // The specifier emitted might not be the redirected specifier, and
-            // therefore we need to ensure it is the correct one.
-            let specifier = graph.resolve_specifier(&specifiers[0]);
-            // Sometimes if tsc sees a CommonJS file it will _helpfully_ output it
-            // to ESM, which we don't really want unless someone has enabled the
-            // check_js option.
-            if !check_js
-              && graph.get_media_type(&specifier) == Some(MediaType::JavaScript)
-            {
-              debug!("skipping emit for {}", specifier);
-              continue;
-            }
-            match emit.media_type {
-              MediaType::JavaScript => {
-                codes.insert(specifier.clone(), emit.data.clone());
-              }
-              MediaType::SourceMap => {
-                maps.insert(specifier.clone(), emit.data.clone());
-              }
-              _ => unreachable!(),
-            }
-          }
-        }
-        let config = config.as_bytes();
-        for (specifier, code) in codes.iter() {
-          if let ModuleSlot::Module(module) =
-            graph.get_module_mut(specifier).unwrap()
-          {
-            module.set_emit(code.clone(), maps.get(specifier).cloned());
-            module.set_version(&config);
-            module.is_dirty = true;
-          } else {
-            return Err(GraphError::MissingSpecifier(specifier.clone()).into());
-          }
-        }
-      }
-      graph.flush()?;
-    }
-
-    Ok(ResultInfo {
-      diagnostics: response.diagnostics,
-      loadable_modules: graph.get_loadable_modules(),
-      maybe_ignored_options,
-      stats: response.stats,
-    })
-  }
-
-  /// Emit the module graph in a specific format.  This is specifically designed
-  /// to be an "all-in-one" API for access by the runtime, allowing both
-  /// emitting single modules as well as bundles, using Deno module resolution
-  /// or supplied sources.
-  pub fn emit(
-    mut self,
-    options: EmitOptions,
-  ) -> Result<(HashMap<String, String>, ResultInfo), AnyError> {
-    let mut config = TsConfig::new(json!({
-      "allowJs": true,
-      "checkJs": false,
-      // TODO(@kitsonk) consider enabling this by default
-      //   see: https://github.com/denoland/deno/issues/7732
-      "emitDecoratorMetadata": false,
-      "esModuleInterop": true,
-      "experimentalDecorators": true,
-      "inlineSourceMap": false,
-      "isolatedModules": true,
-      "jsx": "react",
-      "jsxFactory": "React.createElement",
-      "jsxFragmentFactory": "React.Fragment",
-      "lib": TypeLib::DenoWindow,
-      "module": "esnext",
-      "strict": true,
-      "target": "esnext",
-    }));
-    let opts = match options.bundle_type {
-      BundleType::Esm => json!({
-        "noEmit": true,
-      }),
-      BundleType::None => json!({
-        "outDir": "deno://",
-        "removeComments": true,
-        "sourceMap": true,
-      }),
-    };
-    config.merge(&opts);
-    let maybe_ignored_options =
-      if let Some(user_options) = &options.maybe_user_config {
-        config.merge_user_config(user_options)?
-      } else {
-        None
-      };
-
-    if !options.check && config.get_declaration() {
-      return Err(anyhow!("The option of `check` is false, but the compiler option of `declaration` is true which is not currently supported."));
-    }
-    if options.bundle_type != BundleType::None && config.get_declaration() {
-      return Err(anyhow!("The bundle option is set, but the compiler option of `declaration` is true which is not currently supported."));
-    }
-
-    let mut emitted_files = HashMap::new();
-    if options.check {
-      let root_names = self.get_root_names(!config.get_check_js());
-      let hash_data =
-        vec![config.as_bytes(), version::deno().as_bytes().to_owned()];
-      let graph = Arc::new(Mutex::new(self));
-      let response = tsc::exec(tsc::Request {
-        config: config.clone(),
-        debug: options.debug,
-        graph: graph.clone(),
-        hash_data,
-        maybe_tsbuildinfo: None,
-        root_names,
-      })?;
-
-      let graph = graph.lock().unwrap();
-      match options.bundle_type {
-        BundleType::Esm => {
-          assert!(
-            response.emitted_files.is_empty(),
-            "No files should have been emitted from tsc."
-          );
-          assert_eq!(
-            graph.roots.len(),
-            1,
-            "Only a single root module supported."
-          );
-          let specifier = &graph.roots[0];
-          let s = graph.emit_bundle(specifier, &config.into())?;
-          emitted_files.insert("deno:///bundle.js".to_string(), s);
-        }
-        BundleType::None => {
-          for emitted_file in &response.emitted_files {
-            assert!(
-              emitted_file.maybe_specifiers.is_some(),
-              "Orphaned file emitted."
-            );
-            let specifiers = emitted_file.maybe_specifiers.clone().unwrap();
-            assert_eq!(
-              specifiers.len(),
-              1,
-              "An unexpected number of specifiers associated with emitted file."
-            );
-            let specifier = specifiers[0].clone();
-            let extension = match emitted_file.media_type {
-              MediaType::JavaScript => ".js",
-              MediaType::SourceMap => ".js.map",
-              MediaType::Dts => ".d.ts",
-              _ => unreachable!(),
-            };
-            let key = format!("{}{}", specifier, extension);
-            emitted_files.insert(key, emitted_file.data.clone());
-          }
-        }
-      };
-
-      Ok((
-        emitted_files,
-        ResultInfo {
-          diagnostics: response.diagnostics,
-          loadable_modules: graph.get_loadable_modules(),
-          maybe_ignored_options,
-          stats: response.stats,
-        },
-      ))
-    } else {
-      let start = Instant::now();
-      let mut emit_count = 0_u32;
-      match options.bundle_type {
-        BundleType::Esm => {
-          assert_eq!(
-            self.roots.len(),
-            1,
-            "Only a single root module supported."
-          );
-          let specifier = &self.roots[0];
-          let s = self.emit_bundle(specifier, &config.into())?;
-          emit_count += 1;
-          emitted_files.insert("deno:///bundle.js".to_string(), s);
-        }
-        BundleType::None => {
-          let emit_options: ast::EmitOptions = config.into();
-          for (_, module_slot) in self.modules.iter_mut() {
-            if let ModuleSlot::Module(module) = module_slot {
-              if !(emit_options.check_js
-                || module.media_type == MediaType::JSX
-                || module.media_type == MediaType::TSX
-                || module.media_type == MediaType::TypeScript)
-              {
-                emitted_files
-                  .insert(module.specifier.to_string(), module.source.clone());
-              }
-              let parsed_module = module.parse()?;
-              let (code, maybe_map) = parsed_module.transpile(&emit_options)?;
-              emit_count += 1;
-              emitted_files.insert(format!("{}.js", module.specifier), code);
-              if let Some(map) = maybe_map {
-                emitted_files
-                  .insert(format!("{}.js.map", module.specifier), map);
-              }
-            }
-          }
-          self.flush()?;
-        }
-      }
-
-      let stats = Stats(vec![
-        ("Files".to_string(), self.modules.len() as u32),
-        ("Emitted".to_string(), emit_count),
-        ("Total time".to_string(), start.elapsed().as_millis() as u32),
-      ]);
-
-      Ok((
-        emitted_files,
-        ResultInfo {
-          diagnostics: Default::default(),
-          loadable_modules: self.get_loadable_modules(),
-          maybe_ignored_options,
-          stats,
-        },
-      ))
-    }
-  }
-
-  /// Shared between `bundle()` and `emit()`.
-  fn emit_bundle(
-    &self,
-    specifier: &ModuleSpecifier,
-    emit_options: &ast::EmitOptions,
-  ) -> Result<String, AnyError> {
-    let cm = Rc::new(swc_common::SourceMap::new(
-      swc_common::FilePathMapping::empty(),
-    ));
-    let globals = swc_common::Globals::new();
-    let loader = BundleLoader::new(self, emit_options, &globals, cm.clone());
-    let hook = Box::new(BundleHook);
-    let bundler = swc_bundler::Bundler::new(
-      &globals,
-      cm.clone(),
-      loader,
-      self,
-      swc_bundler::Config::default(),
-      hook,
-    );
-    let mut entries = HashMap::new();
-    entries.insert(
-      "bundle".to_string(),
-      swc_common::FileName::Custom(specifier.to_string()),
-    );
-    let output = bundler
-      .bundle(entries)
-      .context("Unable to output bundle during Graph::bundle().")?;
-    let mut buf = Vec::new();
-    {
-      let mut emitter = swc_ecmascript::codegen::Emitter {
-        cfg: swc_ecmascript::codegen::Config { minify: false },
-        cm: cm.clone(),
-        comments: None,
-        wr: Box::new(swc_ecmascript::codegen::text_writer::JsWriter::new(
-          cm, "\n", &mut buf, None,
-        )),
-      };
-
-      emitter
-        .emit_module(&output[0].module)
-        .context("Unable to emit bundle during Graph::bundle().")?;
-    }
-
-    String::from_utf8(buf).context("Emitted bundle is an invalid utf-8 string.")
-  }
-
-  /// Update the handler with any modules that are marked as _dirty_ and update
-  /// any build info if present.
-  fn flush(&mut self) -> Result<(), AnyError> {
-    let mut handler = self.handler.lock().unwrap();
-    for (_, module_slot) in self.modules.iter_mut() {
-      if let ModuleSlot::Module(module) = module_slot {
-        if module.is_dirty {
-          if let Some(emit) = &module.maybe_emit {
-            handler.set_cache(&module.specifier, emit)?;
-          }
-          if let Some(version) = &module.maybe_version {
-            handler.set_version(&module.specifier, version.clone())?;
-          }
-          module.is_dirty = false;
-        }
-      }
-    }
-    for root_specifier in self.roots.iter() {
-      if let Some(tsbuildinfo) = &self.maybe_tsbuildinfo {
-        handler.set_tsbuildinfo(root_specifier, tsbuildinfo.to_owned())?;
-      }
-    }
-
-    Ok(())
+    return Ok(ResultInfo {
+      // maybe_ignored_options,
+      loadable_modules: self.get_loadable_modules(),
+      ..Default::default()
+    });
   }
 
   fn get_info(
@@ -1300,88 +827,11 @@ impl Graph {
     }
   }
 
-  fn get_module_mut(
-    &mut self,
-    specifier: &ModuleSpecifier,
-  ) -> Option<&mut ModuleSlot> {
-    // this is duplicated code because `.resolve_specifier` requires an
-    // immutable borrow, but if `.resolve_specifier` is mut, then everything
-    // that calls it is is mut
-    let mut s = specifier;
-    while let Some(redirect) = self.redirects.get(s) {
-      s = redirect;
-    }
-    self.modules.get_mut(s)
-  }
-
   /// Consume graph and return list of all module specifiers contained in the
   /// graph.
-  pub fn get_modules(&self) -> Vec<ModuleSpecifier> {
-    self.modules.keys().map(|s| s.to_owned()).collect()
-  }
-
-  /// Transform `self.roots` into something that works for `tsc`, because `tsc`
-  /// doesn't like root names without extensions that match its expectations,
-  /// nor does it have any concept of redirection, so we have to resolve all
-  /// that upfront before feeding it to `tsc`. In addition, if checkJs is not
-  /// true, we should pass all emittable files in as the roots, so that `tsc`
-  /// type checks them and potentially emits them.
-  fn get_root_names(
-    &self,
-    include_emittable: bool,
-  ) -> Vec<(ModuleSpecifier, MediaType)> {
-    let root_names: Vec<ModuleSpecifier> = if include_emittable {
-      // in situations where there is `allowJs` with tsc, but not `checkJs`,
-      // then tsc will not parse the whole module graph, meaning that any
-      // JavaScript importing TypeScript will get ignored, meaning that those
-      // files will not get emitted.  To counter act that behavior, we will
-      // include all modules that are emittable.
-      let mut specifiers = HashSet::<&ModuleSpecifier>::new();
-      for (_, module_slot) in self.modules.iter() {
-        if let ModuleSlot::Module(module) = module_slot {
-          if module.media_type == MediaType::JSX
-            || module.media_type == MediaType::TypeScript
-            || module.media_type == MediaType::TSX
-          {
-            specifiers.insert(&module.specifier);
-          }
-        }
-      }
-      // We should include all the original roots as well.
-      for specifier in self.roots.iter() {
-        specifiers.insert(specifier);
-      }
-      specifiers.into_iter().cloned().collect()
-    } else {
-      self.roots.clone()
-    };
-    root_names
-      .iter()
-      .map(|ms| {
-        // if the root module has a types specifier, we should be sending that
-        // to tsc instead of the original specifier
-        let specifier = self.resolve_specifier(ms);
-        let module =
-          if let ModuleSlot::Module(module) = self.get_module(specifier) {
-            module
-          } else {
-            panic!("missing module");
-          };
-        let specifier = if let Some((_, types_specifier)) = &module.maybe_types
-        {
-          self.resolve_specifier(types_specifier)
-        } else {
-          specifier
-        };
-        (
-          // root modules can be redirects, so before we pass it to tsc we need
-          // to resolve the redirect
-          specifier.clone(),
-          self.get_media_type(specifier).unwrap(),
-        )
-      })
-      .collect()
-  }
+  // pub fn get_modules(&self) -> Vec<ModuleSpecifier> {
+  //   self.modules.keys().map(|s| s.to_owned()).collect()
+  // }
 
   /// Get the source for a given module specifier.  If the module is not part
   /// of the graph, the result will be `None`.
@@ -1444,30 +894,6 @@ impl Graph {
     })
   }
 
-  /// Determines if all of the modules in the graph that require an emit have
-  /// a valid emit.  Returns `true` if all the modules have a valid emit,
-  /// otherwise false.
-  fn is_emit_valid(&self, config: &TsConfig) -> bool {
-    let check_js = config.get_check_js();
-    let config = config.as_bytes();
-    self.modules.iter().all(|(_, m)| {
-      if let ModuleSlot::Module(m) = m {
-        let needs_emit = match m.media_type {
-          MediaType::TypeScript | MediaType::TSX | MediaType::JSX => true,
-          MediaType::JavaScript => check_js,
-          _ => false,
-        };
-        if needs_emit {
-          m.is_emit_valid(&config)
-        } else {
-          true
-        }
-      } else {
-        false
-      }
-    })
-  }
-
   /// Verify the subresource integrity of the graph based upon the optional
   /// lockfile, updating the lockfile with any missing resources.  This will
   /// error if any of the resources do not match their lock status.
@@ -1488,21 +914,6 @@ impl Graph {
         }
       }
     }
-  }
-
-  /// Determines if any of the modules in the graph are required to be emitted.
-  /// This is similar to `emit_valid()` except that the actual emit isn't
-  /// checked to determine if it is valid.
-  fn needs_emit(&self, config: &TsConfig) -> bool {
-    let check_js = config.get_check_js();
-    self.modules.iter().any(|(_, m)| match m {
-      ModuleSlot::Module(m) => match m.media_type {
-        MediaType::TypeScript | MediaType::TSX | MediaType::JSX => true,
-        MediaType::JavaScript => check_js,
-        _ => false,
-      },
-      _ => false,
-    })
   }
 
   /// Given a string specifier and a referring module specifier, provide the
@@ -1606,84 +1017,6 @@ impl Graph {
       }
     }
     s
-  }
-
-  /// Transpile (only transform) the graph, updating any emitted modules
-  /// with the specifier handler.  The result contains any performance stats
-  /// from the compiler and optionally any user provided configuration compiler
-  /// options that were ignored.
-  ///
-  /// # Arguments
-  ///
-  /// * `options` - A structure of options which impact how the code is
-  ///   transpiled.
-  ///
-  pub fn transpile(
-    &mut self,
-    options: TranspileOptions,
-  ) -> Result<ResultInfo, AnyError> {
-    let start = Instant::now();
-
-    let mut ts_config = TsConfig::new(json!({
-      "checkJs": false,
-      "emitDecoratorMetadata": false,
-      "inlineSourceMap": true,
-      "jsx": "react",
-      "jsxFactory": "React.createElement",
-      "jsxFragmentFactory": "React.Fragment",
-    }));
-
-    let maybe_ignored_options =
-      ts_config.merge_tsconfig(options.maybe_config_path)?;
-
-    let config = ts_config.as_bytes();
-    let emit_options: ast::EmitOptions = ts_config.into();
-    let mut emit_count = 0_u32;
-    for (_, module_slot) in self.modules.iter_mut() {
-      if let ModuleSlot::Module(module) = module_slot {
-        // TODO(kitsonk) a lot of this logic should be refactored into `Module` as
-        // we start to support other methods on the graph.  Especially managing
-        // the dirty state is something the module itself should "own".
-
-        // if the module is a Dts file we should skip it
-        if module.media_type == MediaType::Dts {
-          continue;
-        }
-        // if we don't have check_js enabled, we won't touch non TypeScript or JSX
-        // modules
-        if !(emit_options.check_js
-          || module.media_type == MediaType::JSX
-          || module.media_type == MediaType::TSX
-          || module.media_type == MediaType::TypeScript)
-        {
-          continue;
-        }
-        // skip modules that already have a valid emit
-        if !options.reload && module.is_emit_valid(&config) {
-          continue;
-        }
-        let parsed_module = module.parse()?;
-        let emit = parsed_module.transpile(&emit_options)?;
-        emit_count += 1;
-        module.maybe_emit = Some(Emit::Cli(emit));
-        module.set_version(&config);
-        module.is_dirty = true;
-      }
-    }
-    self.flush()?;
-
-    let stats = Stats(vec![
-      ("Files".to_string(), self.modules.len() as u32),
-      ("Emitted".to_string(), emit_count),
-      ("Total time".to_string(), start.elapsed().as_millis() as u32),
-    ]);
-
-    Ok(ResultInfo {
-      diagnostics: Default::default(),
-      loadable_modules: self.get_loadable_modules(),
-      maybe_ignored_options,
-      stats,
-    })
   }
 }
 
@@ -1809,7 +1142,6 @@ impl GraphBuilder {
     match module.media_type {
       MediaType::Json
       | MediaType::SourceMap
-      | MediaType::TsBuildInfo
       | MediaType::Unknown => {
         return Err(
           GraphError::UnsupportedImportType(
@@ -1866,759 +1198,5 @@ impl GraphBuilder {
   pub fn get_graph(self) -> Graph {
     self.graph.lock();
     self.graph
-  }
-}
-
-#[cfg(test)]
-pub mod tests {
-  use super::*;
-
-  use crate::specifier_handler::MemoryHandler;
-  use deno_core::futures::future;
-  use std::env;
-  use std::fs;
-  use std::path::PathBuf;
-  use std::sync::Mutex;
-
-  macro_rules! map (
-    { $($key:expr => $value:expr),+ } => {
-      {
-        let mut m = ::std::collections::HashMap::new();
-        $(
-          m.insert($key, $value);
-        )+
-        m
-      }
-    };
-  );
-
-  /// This is a testing mock for `SpecifierHandler` that uses a special file
-  /// system renaming to mock local and remote modules as well as provides
-  /// "spies" for the critical methods for testing purposes.
-  #[derive(Debug, Default)]
-  pub struct MockSpecifierHandler {
-    pub fixtures: PathBuf,
-    pub maybe_tsbuildinfo: Option<String>,
-    pub tsbuildinfo_calls: Vec<(ModuleSpecifier, String)>,
-    pub cache_calls: Vec<(ModuleSpecifier, Emit)>,
-    pub deps_calls: Vec<(ModuleSpecifier, DependencyMap)>,
-    pub types_calls: Vec<(ModuleSpecifier, String)>,
-    pub version_calls: Vec<(ModuleSpecifier, String)>,
-  }
-
-  impl MockSpecifierHandler {
-    fn get_cache(
-      &self,
-      specifier: ModuleSpecifier,
-    ) -> Result<CachedModule, (ModuleSpecifier, AnyError)> {
-      let specifier_text = specifier
-        .to_string()
-        .replace(":///", "_")
-        .replace("://", "_")
-        .replace("/", "-");
-      let source_path = self.fixtures.join(specifier_text);
-      let media_type = MediaType::from(&source_path);
-      let source = fs::read_to_string(&source_path)
-        .map_err(|err| (specifier.clone(), err.into()))?;
-      let is_remote = specifier.as_url().scheme() != "file";
-
-      Ok(CachedModule {
-        source,
-        requested_specifier: specifier.clone(),
-        source_path,
-        specifier,
-        media_type,
-        is_remote,
-        ..CachedModule::default()
-      })
-    }
-  }
-
-  impl SpecifierHandler for MockSpecifierHandler {
-    fn fetch(
-      &mut self,
-      specifier: ModuleSpecifier,
-      _maybe_referrer: Option<Location>,
-      _is_dynamic: bool,
-    ) -> FetchFuture {
-      Box::pin(future::ready(self.get_cache(specifier)))
-    }
-    fn get_tsbuildinfo(
-      &self,
-      _specifier: &ModuleSpecifier,
-    ) -> Result<Option<String>, AnyError> {
-      Ok(self.maybe_tsbuildinfo.clone())
-    }
-    fn set_cache(
-      &mut self,
-      specifier: &ModuleSpecifier,
-      emit: &Emit,
-    ) -> Result<(), AnyError> {
-      self.cache_calls.push((specifier.clone(), emit.clone()));
-      Ok(())
-    }
-    fn set_types(
-      &mut self,
-      specifier: &ModuleSpecifier,
-      types: String,
-    ) -> Result<(), AnyError> {
-      self.types_calls.push((specifier.clone(), types));
-      Ok(())
-    }
-    fn set_tsbuildinfo(
-      &mut self,
-      specifier: &ModuleSpecifier,
-      tsbuildinfo: String,
-    ) -> Result<(), AnyError> {
-      self.maybe_tsbuildinfo = Some(tsbuildinfo.clone());
-      self
-        .tsbuildinfo_calls
-        .push((specifier.clone(), tsbuildinfo));
-      Ok(())
-    }
-    fn set_deps(
-      &mut self,
-      specifier: &ModuleSpecifier,
-      dependencies: DependencyMap,
-    ) -> Result<(), AnyError> {
-      self.deps_calls.push((specifier.clone(), dependencies));
-      Ok(())
-    }
-    fn set_version(
-      &mut self,
-      specifier: &ModuleSpecifier,
-      version: String,
-    ) -> Result<(), AnyError> {
-      self.version_calls.push((specifier.clone(), version));
-      Ok(())
-    }
-  }
-
-  async fn setup(
-    specifier: ModuleSpecifier,
-  ) -> (Graph, Arc<Mutex<MockSpecifierHandler>>) {
-    let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let fixtures = c.join("tests/module_graph");
-    let handler = Arc::new(Mutex::new(MockSpecifierHandler {
-      fixtures,
-      ..MockSpecifierHandler::default()
-    }));
-    let mut builder = GraphBuilder::new(handler.clone(), None, None);
-    builder
-      .add(&specifier, false)
-      .await
-      .expect("module not inserted");
-
-    (builder.get_graph(), handler)
-  }
-
-  async fn setup_memory(
-    specifier: ModuleSpecifier,
-    sources: HashMap<&str, &str>,
-  ) -> Graph {
-    let sources: HashMap<String, String> = sources
-      .iter()
-      .map(|(k, v)| (k.to_string(), v.to_string()))
-      .collect();
-    let handler = Arc::new(Mutex::new(MemoryHandler::new(sources)));
-    let mut builder = GraphBuilder::new(handler.clone(), None, None);
-    builder
-      .add(&specifier, false)
-      .await
-      .expect("module not inserted");
-
-    builder.get_graph()
-  }
-
-  #[test]
-  fn test_get_version() {
-    let doc_a = "console.log(42);";
-    let version_a = get_version(&doc_a, "1.2.3", b"");
-    let doc_b = "console.log(42);";
-    let version_b = get_version(&doc_b, "1.2.3", b"");
-    assert_eq!(version_a, version_b);
-
-    let version_c = get_version(&doc_a, "1.2.3", b"options");
-    assert_ne!(version_a, version_c);
-
-    let version_d = get_version(&doc_b, "1.2.3", b"options");
-    assert_eq!(version_c, version_d);
-
-    let version_e = get_version(&doc_a, "1.2.4", b"");
-    assert_ne!(version_a, version_e);
-
-    let version_f = get_version(&doc_b, "1.2.4", b"");
-    assert_eq!(version_e, version_f);
-  }
-
-  #[test]
-  fn test_module_emit_valid() {
-    let source = "console.log(42);".to_string();
-    let maybe_version = Some(get_version(&source, &version::deno(), b""));
-    let module = Module {
-      source,
-      maybe_version,
-      ..Module::default()
-    };
-    assert!(module.is_emit_valid(b""));
-
-    let source = "console.log(42);".to_string();
-    let old_source = "console.log(43);";
-    let maybe_version = Some(get_version(old_source, &version::deno(), b""));
-    let module = Module {
-      source,
-      maybe_version,
-      ..Module::default()
-    };
-    assert!(!module.is_emit_valid(b""));
-
-    let source = "console.log(42);".to_string();
-    let maybe_version = Some(get_version(&source, "0.0.0", b""));
-    let module = Module {
-      source,
-      maybe_version,
-      ..Module::default()
-    };
-    assert!(!module.is_emit_valid(b""));
-
-    let source = "console.log(42);".to_string();
-    let module = Module {
-      source,
-      ..Module::default()
-    };
-    assert!(!module.is_emit_valid(b""));
-  }
-
-  #[test]
-  fn test_module_set_version() {
-    let source = "console.log(42);".to_string();
-    let expected = Some(get_version(&source, &version::deno(), b""));
-    let mut module = Module {
-      source,
-      ..Module::default()
-    };
-    assert!(module.maybe_version.is_none());
-    module.set_version(b"");
-    assert_eq!(module.maybe_version, expected);
-  }
-
-  #[tokio::test]
-  async fn test_graph_bundle() {
-    let tests = vec![
-      ("file:///tests/fixture01.ts", "fixture01.out"),
-      ("file:///tests/fixture02.ts", "fixture02.out"),
-      ("file:///tests/fixture03.ts", "fixture03.out"),
-      ("file:///tests/fixture04.ts", "fixture04.out"),
-      ("file:///tests/fixture05.ts", "fixture05.out"),
-      ("file:///tests/fixture06.ts", "fixture06.out"),
-      ("file:///tests/fixture07.ts", "fixture07.out"),
-      ("file:///tests/fixture08.ts", "fixture08.out"),
-      ("file:///tests/fixture09.ts", "fixture09.out"),
-      ("file:///tests/fixture10.ts", "fixture10.out"),
-      ("file:///tests/fixture11.ts", "fixture11.out"),
-      ("file:///tests/fixture12.ts", "fixture12.out"),
-      ("file:///tests/fixture13.ts", "fixture13.out"),
-      ("file:///tests/fixture14.ts", "fixture14.out"),
-      ("file:///tests/fixture15.ts", "fixture15.out"),
-    ];
-    let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let fixtures = c.join("tests/bundle");
-
-    for (specifier, expected_str) in tests {
-      let specifier = ModuleSpecifier::resolve_url_or_path(specifier).unwrap();
-      let handler = Arc::new(Mutex::new(MockSpecifierHandler {
-        fixtures: fixtures.clone(),
-        ..MockSpecifierHandler::default()
-      }));
-      let mut builder = GraphBuilder::new(handler.clone(), None, None);
-      builder
-        .add(&specifier, false)
-        .await
-        .expect("module not inserted");
-      let graph = builder.get_graph();
-      let (actual, stats, maybe_ignored_options) = graph
-        .bundle(BundleOptions::default())
-        .expect("could not bundle");
-      assert_eq!(stats.0.len(), 2);
-      assert_eq!(maybe_ignored_options, None);
-      let expected_path = fixtures.join(expected_str);
-      let expected = fs::read_to_string(expected_path).unwrap();
-      assert_eq!(actual, expected, "fixture: {}", specifier);
-    }
-  }
-
-  #[tokio::test]
-  async fn test_graph_check_emit() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts")
-        .expect("could not resolve module");
-    let (graph, handler) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: true,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: None,
-        reload: false,
-      })
-      .expect("should have checked");
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert_eq!(result_info.stats.0.len(), 12);
-    assert!(result_info.diagnostics.is_empty());
-    let h = handler.lock().unwrap();
-    assert_eq!(h.cache_calls.len(), 2);
-    assert_eq!(h.tsbuildinfo_calls.len(), 1);
-  }
-
-  #[tokio::test]
-  async fn test_graph_check_ignores_dynamic_import_errors() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/dynamicimport.ts")
-        .expect("could not resolve module");
-    let (graph, _) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: false,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: None,
-        reload: false,
-      })
-      .expect("should have checked");
-    assert!(result_info.diagnostics.is_empty());
-  }
-
-  #[tokio::test]
-  async fn fix_graph_check_emit_diagnostics() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/diag.ts")
-        .expect("could not resolve module");
-    let (graph, handler) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: true,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: None,
-        reload: false,
-      })
-      .expect("should have checked");
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert_eq!(result_info.stats.0.len(), 12);
-    assert!(!result_info.diagnostics.is_empty());
-    let h = handler.lock().unwrap();
-    // we shouldn't cache any files or write out tsbuildinfo if there are
-    // diagnostic errors
-    assert_eq!(h.cache_calls.len(), 0);
-    assert_eq!(h.tsbuildinfo_calls.len(), 0);
-  }
-
-  #[tokio::test]
-  async fn test_graph_check_no_emit() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts")
-        .expect("could not resolve module");
-    let (graph, handler) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: false,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: None,
-        reload: false,
-      })
-      .expect("should have checked");
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert_eq!(result_info.stats.0.len(), 12);
-    assert!(result_info.diagnostics.is_empty());
-    let h = handler.lock().unwrap();
-    assert_eq!(h.cache_calls.len(), 0);
-    assert_eq!(h.tsbuildinfo_calls.len(), 1);
-  }
-
-  #[tokio::test]
-  async fn fix_graph_check_mjs_root() {
-    let specifier = ModuleSpecifier::resolve_url_or_path("file:///tests/a.mjs")
-      .expect("could not resolve module");
-    let (graph, handler) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: true,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: None,
-        reload: false,
-      })
-      .expect("should have checked");
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert!(result_info.diagnostics.is_empty());
-    let h = handler.lock().unwrap();
-    assert_eq!(h.cache_calls.len(), 1);
-    assert_eq!(h.tsbuildinfo_calls.len(), 1);
-  }
-
-  #[tokio::test]
-  async fn fix_graph_check_types_root() {
-    let specifier = ModuleSpecifier::resolve_url_or_path("file:///typesref.js")
-      .expect("could not resolve module");
-    let (graph, _) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: false,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: None,
-        reload: false,
-      })
-      .expect("should have checked");
-    assert!(result_info.diagnostics.is_empty());
-  }
-
-  #[tokio::test]
-  async fn test_graph_check_user_config() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/checkwithconfig.ts")
-        .expect("could not resolve module");
-    let (graph, handler) = setup(specifier.clone()).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: true,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: Some(
-          "tests/module_graph/tsconfig_01.json".to_string(),
-        ),
-        reload: true,
-      })
-      .expect("should have checked");
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert!(result_info.diagnostics.is_empty());
-    let (ver0, ver1) = {
-      let h = handler.lock().unwrap();
-      assert_eq!(h.version_calls.len(), 2);
-      (h.version_calls[0].1.clone(), h.version_calls[1].1.clone())
-    };
-
-    // let's do it all over again to ensure that the versions are determinstic
-    let (graph, handler) = setup(specifier).await;
-    let result_info = graph
-      .check(CheckOptions {
-        debug: false,
-        emit: true,
-        lib: TypeLib::DenoWindow,
-        maybe_config_path: Some(
-          "tests/module_graph/tsconfig_01.json".to_string(),
-        ),
-        reload: true,
-      })
-      .expect("should have checked");
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert!(result_info.diagnostics.is_empty());
-    let h = handler.lock().unwrap();
-    assert_eq!(h.version_calls.len(), 2);
-    assert!(h.version_calls[0].1 == ver0 || h.version_calls[0].1 == ver1);
-    assert!(h.version_calls[1].1 == ver0 || h.version_calls[1].1 == ver1);
-  }
-
-  #[tokio::test]
-  async fn test_graph_emit() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///a.ts").unwrap();
-    let graph = setup_memory(
-      specifier,
-      map!(
-        "/a.ts" => r#"
-        import * as b from "./b.ts";
-
-        console.log(b);
-      "#,
-        "/b.ts" => r#"
-        export const b = "b";
-      "#
-      ),
-    )
-    .await;
-    let (emitted_files, result_info) = graph
-      .emit(EmitOptions {
-        check: true,
-        bundle_type: BundleType::None,
-        debug: false,
-        maybe_user_config: None,
-      })
-      .expect("should have emitted");
-    assert!(result_info.diagnostics.is_empty());
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert_eq!(emitted_files.len(), 4);
-    let out_a = emitted_files.get("file:///a.ts.js");
-    assert!(out_a.is_some());
-    let out_a = out_a.unwrap();
-    assert!(out_a.starts_with("import * as b from"));
-    assert!(emitted_files.contains_key("file:///a.ts.js.map"));
-    let out_b = emitted_files.get("file:///b.ts.js");
-    assert!(out_b.is_some());
-    let out_b = out_b.unwrap();
-    assert!(out_b.starts_with("export const b = \"b\";"));
-    assert!(emitted_files.contains_key("file:///b.ts.js.map"));
-  }
-
-  #[tokio::test]
-  async fn test_graph_emit_bundle() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///a.ts").unwrap();
-    let graph = setup_memory(
-      specifier,
-      map!(
-        "/a.ts" => r#"
-        import * as b from "./b.ts";
-
-        console.log(b);
-      "#,
-        "/b.ts" => r#"
-        export const b = "b";
-      "#
-      ),
-    )
-    .await;
-    let (emitted_files, result_info) = graph
-      .emit(EmitOptions {
-        check: true,
-        bundle_type: BundleType::Esm,
-        debug: false,
-        maybe_user_config: None,
-      })
-      .expect("should have emitted");
-    assert!(result_info.diagnostics.is_empty());
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert_eq!(emitted_files.len(), 1);
-    let actual = emitted_files.get("deno:///bundle.js");
-    assert!(actual.is_some());
-    let actual = actual.unwrap();
-    assert!(actual.contains("const b = \"b\";"));
-    assert!(actual.contains("console.log(mod);"));
-  }
-
-  #[tokio::test]
-  async fn fix_graph_emit_declaration() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///a.ts").unwrap();
-    let graph = setup_memory(
-      specifier,
-      map!(
-        "/a.ts" => r#"
-        import * as b from "./b.ts";
-
-        console.log(b);
-      "#,
-        "/b.ts" => r#"
-        export const b = "b";
-      "#
-      ),
-    )
-    .await;
-    let mut user_config = HashMap::<String, Value>::new();
-    user_config.insert("declaration".to_string(), json!(true));
-    let (emitted_files, result_info) = graph
-      .emit(EmitOptions {
-        check: true,
-        bundle_type: BundleType::None,
-        debug: false,
-        maybe_user_config: Some(user_config),
-      })
-      .expect("should have emitted");
-    assert!(result_info.diagnostics.is_empty());
-    assert!(result_info.maybe_ignored_options.is_none());
-    assert_eq!(emitted_files.len(), 6);
-    let out_a = emitted_files.get("file:///a.ts.js");
-    assert!(out_a.is_some());
-    let out_a = out_a.unwrap();
-    assert!(out_a.starts_with("import * as b from"));
-    assert!(emitted_files.contains_key("file:///a.ts.js.map"));
-    assert!(emitted_files.contains_key("file:///a.ts.d.ts"));
-    let out_b = emitted_files.get("file:///b.ts.js");
-    assert!(out_b.is_some());
-    let out_b = out_b.unwrap();
-    assert!(out_b.starts_with("export const b = \"b\";"));
-    assert!(emitted_files.contains_key("file:///b.ts.js.map"));
-    assert!(emitted_files.contains_key("file:///b.ts.d.ts"));
-  }
-
-  #[tokio::test]
-  async fn test_graph_info() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts")
-        .expect("could not resolve module");
-    let (graph, _) = setup(specifier).await;
-    let info = graph.info().expect("could not get info");
-    assert!(info.compiled.is_none());
-    assert_eq!(info.dep_count, 6);
-    assert_eq!(info.file_type, MediaType::TypeScript);
-    assert_eq!(info.files.0.len(), 7);
-    assert!(info.local.to_string_lossy().ends_with("file_tests-main.ts"));
-    assert!(info.map.is_none());
-    assert_eq!(
-      info.module,
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts").unwrap()
-    );
-    assert_eq!(info.total_size, 344);
-  }
-
-  #[tokio::test]
-  async fn test_graph_import_json() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/importjson.ts")
-        .expect("could not resolve module");
-    let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let fixtures = c.join("tests/module_graph");
-    let handler = Arc::new(Mutex::new(MockSpecifierHandler {
-      fixtures,
-      ..MockSpecifierHandler::default()
-    }));
-    let mut builder = GraphBuilder::new(handler.clone(), None, None);
-    builder
-      .add(&specifier, false)
-      .await
-      .expect_err("should have errored");
-  }
-
-  #[tokio::test]
-  async fn test_graph_transpile() {
-    // This is a complex scenario of transpiling, where we have TypeScript
-    // importing a JavaScript file (with type definitions) which imports
-    // TypeScript, JavaScript, and JavaScript with type definitions.
-    // For scenarios where we transpile, we only want the TypeScript files
-    // to be actually emitted.
-    //
-    // This also exercises "@deno-types" and type references.
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts")
-        .expect("could not resolve module");
-    let (mut graph, handler) = setup(specifier).await;
-    let result_info = graph.transpile(TranspileOptions::default()).unwrap();
-    assert_eq!(result_info.stats.0.len(), 3);
-    assert_eq!(result_info.maybe_ignored_options, None);
-    let h = handler.lock().unwrap();
-    assert_eq!(h.cache_calls.len(), 2);
-    match &h.cache_calls[0].1 {
-      Emit::Cli((code, maybe_map)) => {
-        assert!(
-          code.contains("# sourceMappingURL=data:application/json;base64,")
-        );
-        assert!(maybe_map.is_none());
-      }
-    };
-    match &h.cache_calls[1].1 {
-      Emit::Cli((code, maybe_map)) => {
-        assert!(
-          code.contains("# sourceMappingURL=data:application/json;base64,")
-        );
-        assert!(maybe_map.is_none());
-      }
-    };
-    assert_eq!(h.deps_calls.len(), 7);
-    assert_eq!(
-      h.deps_calls[0].0,
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts").unwrap()
-    );
-    assert_eq!(h.deps_calls[0].1.len(), 1);
-    assert_eq!(
-      h.deps_calls[1].0,
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/lib/mod.js")
-        .unwrap()
-    );
-    assert_eq!(h.deps_calls[1].1.len(), 3);
-    assert_eq!(
-      h.deps_calls[2].0,
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/lib/mod.d.ts")
-        .unwrap()
-    );
-    assert_eq!(h.deps_calls[2].1.len(), 3, "should have 3 dependencies");
-    // sometimes the calls are not deterministic, and so checking the contents
-    // can cause some failures
-    assert_eq!(h.deps_calls[3].1.len(), 0, "should have no dependencies");
-    assert_eq!(h.deps_calls[4].1.len(), 0, "should have no dependencies");
-    assert_eq!(h.deps_calls[5].1.len(), 0, "should have no dependencies");
-    assert_eq!(h.deps_calls[6].1.len(), 0, "should have no dependencies");
-  }
-
-  #[tokio::test]
-  async fn test_graph_transpile_user_config() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/transpile.tsx")
-        .expect("could not resolve module");
-    let (mut graph, handler) = setup(specifier).await;
-    let result_info = graph
-      .transpile(TranspileOptions {
-        debug: false,
-        maybe_config_path: Some("tests/module_graph/tsconfig.json".to_string()),
-        reload: false,
-      })
-      .unwrap();
-    assert_eq!(
-      result_info.maybe_ignored_options.unwrap().items,
-      vec!["target".to_string()],
-      "the 'target' options should have been ignored"
-    );
-    let h = handler.lock().unwrap();
-    assert_eq!(h.cache_calls.len(), 1, "only one file should be emitted");
-    // FIXME(bartlomieju): had to add space in `<div>`, probably a quirk in swc_ecma_codegen
-    match &h.cache_calls[0].1 {
-      Emit::Cli((code, _)) => {
-        assert!(
-          code.contains("<div >Hello world!</div>"),
-          "jsx should have been preserved"
-        );
-      }
-    }
-  }
-
-  #[tokio::test]
-  async fn test_graph_import_map_remote_to_local() {
-    let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let fixtures = c.join("tests/module_graph");
-    let maybe_import_map = Some(
-      ImportMap::from_json(
-        "file:///tests/importmap.json",
-        r#"{
-      "imports": {
-        "https://deno.land/x/b/mod.js": "./b/mod.js"
-      }
-    }
-    "#,
-      )
-      .expect("could not parse import map"),
-    );
-    let handler = Arc::new(Mutex::new(MockSpecifierHandler {
-      fixtures,
-      ..Default::default()
-    }));
-    let mut builder = GraphBuilder::new(handler, maybe_import_map, None);
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/importremap.ts")
-        .expect("could not resolve module");
-    builder.add(&specifier, false).await.expect("could not add");
-    builder.get_graph();
-  }
-
-  #[tokio::test]
-  async fn test_graph_with_lockfile() {
-    let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let fixtures = c.join("tests/module_graph");
-    let lockfile_path = fixtures.join("lockfile.json");
-    let lockfile =
-      Lockfile::new(lockfile_path, false).expect("could not load lockfile");
-    let maybe_lockfile = Some(Arc::new(Mutex::new(lockfile)));
-    let handler = Arc::new(Mutex::new(MockSpecifierHandler {
-      fixtures,
-      ..MockSpecifierHandler::default()
-    }));
-    let mut builder = GraphBuilder::new(handler.clone(), None, maybe_lockfile);
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("file:///tests/main.ts")
-        .expect("could not resolve module");
-    builder
-      .add(&specifier, false)
-      .await
-      .expect("module not inserted");
-    builder.get_graph();
   }
 }

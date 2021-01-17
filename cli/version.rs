@@ -1,7 +1,8 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
 pub const GIT_COMMIT_HASH: &str = env!("GIT_COMMIT_HASH");
-pub const TYPESCRIPT: &str = env!("TS_VERSION");
+pub const TYPESCRIPT: &str = "3.7.0";
+
 
 pub fn deno() -> String {
   let semver = env!("CARGO_PKG_VERSION");

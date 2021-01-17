@@ -1,3 +1,0 @@
-[WILDCARD]PermissionStatus { state: "granted" }
-PermissionStatus { state: "prompt" }
-PermissionStatus { state: "denied" }

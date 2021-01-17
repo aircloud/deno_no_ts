@@ -9,7 +9,7 @@ use crate::import_map::ImportMap;
 use crate::lockfile::Lockfile;
 use crate::module_graph::CheckOptions;
 use crate::module_graph::GraphBuilder;
-use crate::module_graph::TranspileOptions;
+// use crate::module_graph::TranspileOptions;
 use crate::module_graph::TypeLib;
 use crate::source_maps::SourceMapGetter;
 use crate::specifier_handler::FetchHandler;
@@ -45,7 +45,6 @@ pub struct ProgramState {
   /// Flags parsed from `argv` contents.
   pub flags: flags::Flags,
   pub dir: deno_dir::DenoDir,
-  pub coverage_dir: Option<String>,
   pub file_fetcher: FileFetcher,
   pub modules:
     Arc<Mutex<HashMap<ModuleSpecifier, Result<ModuleSource, AnyError>>>>,
@@ -81,7 +80,6 @@ impl ProgramState {
       http_cache,
       cache_usage,
       !flags.no_remote,
-      ca_data.clone(),
     )?;
 
     let lockfile = if let Some(filename) = &flags.lock {
@@ -111,14 +109,8 @@ impl ProgramState {
       None => None,
     };
 
-    let coverage_dir = flags
-      .coverage_dir
-      .clone()
-      .or_else(|| env::var("DENO_UNSTABLE_COVERAGE_DIR").ok());
-
     let program_state = ProgramState {
       dir,
-      coverage_dir,
       flags,
       file_fetcher,
       modules: Default::default(),
@@ -154,22 +146,22 @@ impl ProgramState {
     let mut builder =
       GraphBuilder::new(handler, maybe_import_map, self.lockfile.clone());
     builder.add(&specifier, is_dynamic).await?;
-    let mut graph = builder.get_graph();
+    let graph = builder.get_graph();
     let debug = self.flags.log_level == Some(log::Level::Debug);
     let maybe_config_path = self.flags.config_path.clone();
 
-    let result_modules = if self.flags.no_check {
-      let result_info = graph.transpile(TranspileOptions {
-        debug,
-        maybe_config_path,
-        reload: self.flags.reload,
-      })?;
-      debug!("{}", result_info.stats);
-      if let Some(ignored_options) = result_info.maybe_ignored_options {
-        warn!("{}", ignored_options);
-      }
-      result_info.loadable_modules
-    } else {
+    // let result_modules = if self.flags.no_check {
+    //   let result_info = graph.transpile(TranspileOptions {
+    //     debug,
+    //     maybe_config_path,
+    //     reload: self.flags.reload,
+    //   })?;
+    //   debug!("{}", result_info.stats);
+    //   // if let Some(ignored_options) = result_info.maybe_ignored_options {
+    //   //   warn!("{}", ignored_options);
+    //   // }
+    //   result_info.loadable_modules
+    // } else {
       let result_info = graph.check(CheckOptions {
         debug,
         emit: true,
@@ -179,14 +171,14 @@ impl ProgramState {
       })?;
 
       debug!("{}", result_info.stats);
-      if let Some(ignored_options) = result_info.maybe_ignored_options {
-        eprintln!("{}", ignored_options);
-      }
+      // if let Some(ignored_options) = result_info.maybe_ignored_options {
+      //   eprintln!("{}", ignored_options);
+      // }
       if !result_info.diagnostics.is_empty() {
         return Err(anyhow!(result_info.diagnostics));
       }
-      result_info.loadable_modules
-    };
+      let result_modules = result_info.loadable_modules;
+    // };
 
     let mut loadable_modules = self.modules.lock().unwrap();
     loadable_modules.extend(result_modules);
@@ -208,8 +200,12 @@ impl ProgramState {
     modules
       .get(&specifier)
       .map(|r| match r {
-        Ok(module_source) => Ok(module_source.clone()),
+        Ok(module_source) => {
+          debug!("load the source code: {:?}", module_source.code);
+          return Ok(module_source.clone());
+        } ,
         Err(err) => {
+          debug!("deno load error!");
           // TODO(@kitsonk) this feels a bit hacky but it works, without
           // introducing another enum to have to try to deal with.
           if get_custom_error_class(err) == Some("NotFound") {

@@ -1,5 +1,15 @@
 # Deno
 
+**去掉了 TS 支持的 Deno，只保留运行和调试本地 JS 文件的能力**
+
+该库的意义：
+
+* 可以简单地基于此进行进一步裁剪，从而变成一个嵌入 PC 客户端应用的 JS 运行时
+
+> 该项工作正在进行中，目前有一些正在完善的地方，例如测试部分目前未完善
+
+---
+
 [![Build Status - Cirrus][]][Build status] [![Twitter handle][]][Twitter badge]
 
 <img align="right" src=docs/images/deno3.png height="150px">

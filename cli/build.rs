@@ -24,9 +24,14 @@ fn create_snapshot(
   // workspace root.
   let display_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
   for file in files {
+
     println!("cargo:rerun-if-changed={}", file.display());
     let display_path = file.strip_prefix(display_root).unwrap();
     let display_path_str = display_path.display().to_string();
+
+    println!("cargo:warning=cli! create_snapshot file {:?}, filename: {:?}", file,
+    &("deno:".to_string() + &display_path_str.replace('\\', "/")));
+
     js_runtime
       .execute(
         &("deno:".to_string() + &display_path_str.replace('\\', "/")),
@@ -191,19 +196,6 @@ fn create_compiler_snapshot(
   create_snapshot(js_runtime, snapshot_path, files);
 }
 
-fn ts_version() -> String {
-  std::fs::read_to_string("tsc/00_typescript.js")
-    .unwrap()
-    .lines()
-    .find(|l| l.contains("ts.version = "))
-    .expect(
-      "Failed to find the pattern `ts.version = ` in typescript source code",
-    )
-    .chars()
-    .skip_while(|c| !char::is_numeric(*c))
-    .take_while(|c| *c != '"')
-    .collect::<String>()
-}
 
 fn git_commit_hash() -> String {
   if let Ok(output) = std::process::Command::new("git")
@@ -236,7 +228,6 @@ fn main() {
   // To debug snapshot issues uncomment:
   // op_fetch_asset::trace_serializer();
 
-  println!("cargo:rustc-env=TS_VERSION={}", ts_version());
   println!("cargo:rustc-env=GIT_COMMIT_HASH={}", git_commit_hash());
   println!(
     "cargo:rustc-env=DENO_WEB_LIB_PATH={}",
@@ -264,12 +255,13 @@ fn main() {
   let compiler_snapshot_path = o.join("COMPILER_SNAPSHOT.bin");
 
   let js_files = get_js_files("tsc");
+  println!("cargo:warning=cli! js_files {:?}", js_files);
+
   create_compiler_snapshot(&compiler_snapshot_path, js_files, &c);
 
   #[cfg(target_os = "windows")]
   {
     let mut res = winres::WindowsResource::new();
-    res.set_icon("deno.ico");
     res.set_language(winapi::um::winnt::MAKELANGID(
       winapi::um::winnt::LANG_ENGLISH,
       winapi::um::winnt::SUBLANG_ENGLISH_US,

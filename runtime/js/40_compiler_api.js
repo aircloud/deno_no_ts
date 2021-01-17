@@ -34,15 +34,15 @@
    */
 
   /**
-   * @param {OpEmitRequest} request 
+   * @param {OpEmitRequest} request
    * @returns {Promise<OpEmitResponse>}
    */
   function opEmit(request) {
-    return core.jsonOpAsync("op_emit", request);
+    throw new Error("no support")
   }
 
   /**
-   * @param {string} specifier 
+   * @param {string} specifier
    * @returns {string}
    */
   function checkRelative(specifier) {
@@ -62,9 +62,9 @@
    */
 
   /**
-   * @param {string | URL} rootSpecifier 
+   * @param {string | URL} rootSpecifier
    * @param {EmitOptions=} options
-   * @returns {Promise<OpEmitResponse>} 
+   * @returns {Promise<OpEmitResponse>}
    */
   function emit(rootSpecifier, options = {}) {
     util.log(`Deno.emit`, { rootSpecifier });
@@ -79,7 +79,7 @@
     if (!options.sources) {
       rootSpecifier = checkRelative(rootSpecifier);
     }
-    return opEmit({ rootSpecifier, ...options });
+    throw new Error("no support");
   }
 
   window.__bootstrap.compilerApi = {

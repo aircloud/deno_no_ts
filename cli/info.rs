@@ -256,7 +256,7 @@ mod test {
     ModuleGraphInfo {
       compiled: Some(PathBuf::from("/a/b/c.js")),
       dep_count: 99,
-      file_type: MediaType::TypeScript,
+      file_type: MediaType::JavaScript,
       files,
       info,
       local: PathBuf::from("/a/b/c.ts"),

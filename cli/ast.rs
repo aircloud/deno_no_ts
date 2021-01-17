@@ -1,20 +1,20 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
 
 use crate::media_type::MediaType;
-use crate::tsc_config;
+
 
 use deno_core::error::AnyError;
-use deno_core::serde_json;
+
 use deno_core::ModuleSpecifier;
 use std::error::Error;
 use std::fmt;
-use std::ops::Range;
+
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::RwLock;
 use swc_common::chain;
 use swc_common::comments::Comment;
-use swc_common::comments::CommentKind;
+
 use swc_common::comments::SingleThreadedComments;
 use swc_common::errors::Diagnostic;
 use swc_common::errors::DiagnosticBuilder;
@@ -28,21 +28,19 @@ use swc_common::SourceFile;
 use swc_common::SourceMap;
 use swc_common::Span;
 use swc_ecmascript::ast::Module;
-use swc_ecmascript::ast::Program;
-use swc_ecmascript::codegen::text_writer::JsWriter;
-use swc_ecmascript::codegen::Node;
+
 use swc_ecmascript::dep_graph::analyze_dependencies;
 use swc_ecmascript::dep_graph::DependencyDescriptor;
 use swc_ecmascript::parser::lexer::Lexer;
-use swc_ecmascript::parser::token::Token;
+
 use swc_ecmascript::parser::EsConfig;
 use swc_ecmascript::parser::JscTarget;
 use swc_ecmascript::parser::StringInput;
 use swc_ecmascript::parser::Syntax;
-use swc_ecmascript::parser::TsConfig;
+
 use swc_ecmascript::transforms::fixer;
 use swc_ecmascript::transforms::helpers;
-use swc_ecmascript::transforms::hygiene;
+
 use swc_ecmascript::transforms::pass::Optional;
 use swc_ecmascript::transforms::proposals;
 use swc_ecmascript::transforms::react;
@@ -166,23 +164,9 @@ fn get_es_config(jsx: bool) -> EsConfig {
   }
 }
 
-fn get_ts_config(tsx: bool, dts: bool) -> TsConfig {
-  TsConfig {
-    decorators: true,
-    dts,
-    dynamic_import: true,
-    tsx,
-    ..TsConfig::default()
-  }
-}
-
 pub fn get_syntax(media_type: &MediaType) -> Syntax {
   match media_type {
     MediaType::JavaScript => Syntax::Es(get_es_config(false)),
-    MediaType::JSX => Syntax::Es(get_es_config(true)),
-    MediaType::TypeScript => Syntax::Typescript(get_ts_config(false, false)),
-    MediaType::Dts => Syntax::Typescript(get_ts_config(false, true)),
-    MediaType::TSX => Syntax::Typescript(get_ts_config(true, false)),
     _ => Syntax::Es(get_es_config(false)),
   }
 }
@@ -222,20 +206,6 @@ impl Default for EmitOptions {
   }
 }
 
-impl From<tsc_config::TsConfig> for EmitOptions {
-  fn from(config: tsc_config::TsConfig) -> Self {
-    let options: tsc_config::EmitConfigOptions =
-      serde_json::from_value(config.0).unwrap();
-    EmitOptions {
-      check_js: options.check_js,
-      emit_metadata: options.emit_decorator_metadata,
-      inline_source_map: options.inline_source_map,
-      jsx_factory: options.jsx_factory,
-      jsx_fragment_factory: options.jsx_fragment_factory,
-      transform_jsx: options.jsx == "react",
-    }
-  }
-}
 
 /// A logical structure to hold the value of a parsed module for further
 /// processing.
@@ -262,95 +232,6 @@ impl ParsedModule {
   /// Return a vector of dependencies for the module.
   pub fn analyze_dependencies(&self) -> Vec<DependencyDescriptor> {
     analyze_dependencies(&self.module, &self.source_map, &self.comments)
-  }
-
-  /// Get the module's leading comments, where triple slash directives might
-  /// be located.
-  pub fn get_leading_comments(&self) -> Vec<Comment> {
-    self.leading_comments.clone()
-  }
-
-  /// Get a location for a given span within the module.
-  pub fn get_location(&self, span: &Span) -> Location {
-    self.source_map.lookup_char_pos(span.lo).into()
-  }
-
-  /// Transform a TypeScript file into a JavaScript file, based on the supplied
-  /// options.
-  ///
-  /// The result is a tuple of the code and optional source map as strings.
-  pub fn transpile(
-    self,
-    options: &EmitOptions,
-  ) -> Result<(String, Option<String>), AnyError> {
-    let program = Program::Module(self.module);
-
-    let jsx_pass = react::react(
-      self.source_map.clone(),
-      Some(&self.comments),
-      react::Options {
-        pragma: options.jsx_factory.clone(),
-        pragma_frag: options.jsx_fragment_factory.clone(),
-        // this will use `Object.assign()` instead of the `_extends` helper
-        // when spreading props.
-        use_builtins: true,
-        ..Default::default()
-      },
-    );
-    let mut passes = chain!(
-      Optional::new(jsx_pass, options.transform_jsx),
-      proposals::decorators::decorators(proposals::decorators::Config {
-        legacy: true,
-        emit_metadata: options.emit_metadata
-      }),
-      helpers::inject_helpers(),
-      typescript::strip(),
-      fixer(Some(&self.comments)),
-      hygiene(),
-    );
-
-    let program = swc_common::GLOBALS.set(&Globals::new(), || {
-      helpers::HELPERS.set(&helpers::Helpers::new(false), || {
-        program.fold_with(&mut passes)
-      })
-    });
-
-    let mut src_map_buf = vec![];
-    let mut buf = vec![];
-    {
-      let writer = Box::new(JsWriter::new(
-        self.source_map.clone(),
-        "\n",
-        &mut buf,
-        Some(&mut src_map_buf),
-      ));
-      let config = swc_ecmascript::codegen::Config { minify: false };
-      let mut emitter = swc_ecmascript::codegen::Emitter {
-        cfg: config,
-        comments: Some(&self.comments),
-        cm: self.source_map.clone(),
-        wr: writer,
-      };
-      program.emit_with(&mut emitter)?;
-    }
-    let mut src = String::from_utf8(buf)?;
-    let mut map: Option<String> = None;
-    {
-      let mut buf = Vec::new();
-      self
-        .source_map
-        .build_source_map_from(&mut src_map_buf, None)
-        .to_writer(&mut buf)?;
-
-      if options.inline_source_map {
-        src.push_str("//# sourceMappingURL=data:application/json;base64,");
-        let encoded_map = base64::encode(buf);
-        src.push_str(&encoded_map);
-      } else {
-        map = Some(String::from_utf8(buf)?);
-      }
-    }
-    Ok((src, map))
   }
 }
 
@@ -423,68 +304,6 @@ pub fn parse(
   parse_with_source_map(specifier, source, media_type, source_map)
 }
 
-pub enum TokenOrComment {
-  Token(Token),
-  Comment { kind: CommentKind, text: String },
-}
-
-pub struct LexedItem {
-  pub span: Span,
-  pub inner: TokenOrComment,
-}
-
-impl LexedItem {
-  pub fn span_as_range(&self) -> Range<usize> {
-    self.span.lo.0 as usize..self.span.hi.0 as usize
-  }
-}
-
-fn flatten_comments(
-  comments: SingleThreadedComments,
-) -> impl Iterator<Item = Comment> {
-  let (leading, trailing) = comments.take_all();
-  let mut comments = (*leading).clone().into_inner();
-  comments.extend((*trailing).clone().into_inner());
-  comments.into_iter().flat_map(|el| el.1)
-}
-
-pub fn lex(
-  specifier: &str,
-  source: &str,
-  media_type: &MediaType,
-) -> Vec<LexedItem> {
-  let source_map = SourceMap::default();
-  let source_file = source_map.new_source_file(
-    FileName::Custom(specifier.to_string()),
-    source.to_string(),
-  );
-  let comments = SingleThreadedComments::default();
-  let lexer = Lexer::new(
-    get_syntax(media_type),
-    TARGET,
-    StringInput::from(source_file.as_ref()),
-    Some(&comments),
-  );
-
-  let mut tokens: Vec<LexedItem> = lexer
-    .map(|token| LexedItem {
-      span: token.span,
-      inner: TokenOrComment::Token(token.token),
-    })
-    .collect();
-
-  tokens.extend(flatten_comments(comments).map(|comment| LexedItem {
-    span: comment.span,
-    inner: TokenOrComment::Comment {
-      kind: comment.kind,
-      text: comment.text,
-    },
-  }));
-
-  tokens.sort_by_key(|item| item.span.lo.0);
-
-  tokens
-}
 
 /// A low level function which transpiles a source module into an swc
 /// SourceFile.
@@ -582,135 +401,5 @@ impl swc_bundler::Hook for BundleHook {
         }),
       },
     ])
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use swc_ecmascript::dep_graph::DependencyKind;
-
-  #[test]
-  fn test_parsed_module_analyze_dependencies() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.js")
-        .unwrap();
-    let source = r#"import * as bar from "./test.ts";
-    const foo = await import("./foo.ts");
-    "#;
-    let parsed_module =
-      parse(specifier.as_str(), source, &MediaType::JavaScript)
-        .expect("could not parse module");
-    let actual = parsed_module.analyze_dependencies();
-    assert_eq!(
-      actual,
-      vec![
-        DependencyDescriptor {
-          kind: DependencyKind::Import,
-          is_dynamic: false,
-          leading_comments: Vec::new(),
-          col: 0,
-          line: 1,
-          specifier: "./test.ts".into(),
-          specifier_col: 21,
-          specifier_line: 1,
-        },
-        DependencyDescriptor {
-          kind: DependencyKind::Import,
-          is_dynamic: true,
-          leading_comments: Vec::new(),
-          col: 22,
-          line: 2,
-          specifier: "./foo.ts".into(),
-          specifier_col: 29,
-          specifier_line: 2,
-        }
-      ]
-    );
-  }
-
-  #[test]
-  fn test_transpile() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.ts")
-        .expect("could not resolve specifier");
-    let source = r#"
-    enum D {
-      A,
-      B,
-      C,
-    }
-
-    export class A {
-      private b: string;
-      protected c: number = 1;
-      e: "foo";
-      constructor (public d = D.A) {
-        const e = "foo" as const;
-        this.e = e;
-      }
-    }
-    "#;
-    let module = parse(specifier.as_str(), source, &MediaType::TypeScript)
-      .expect("could not parse module");
-    let (code, maybe_map) = module
-      .transpile(&EmitOptions::default())
-      .expect("could not strip types");
-    assert!(code.starts_with("var D;\n(function(D) {\n"));
-    assert!(
-      code.contains("\n//# sourceMappingURL=data:application/json;base64,")
-    );
-    assert!(maybe_map.is_none());
-  }
-
-  #[test]
-  fn test_transpile_tsx() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.ts")
-        .expect("could not resolve specifier");
-    let source = r#"
-    export class A {
-      render() {
-        return <div><span></span></div>
-      }
-    }
-    "#;
-    let module = parse(specifier.as_str(), source, &MediaType::TSX)
-      .expect("could not parse module");
-    let (code, _) = module
-      .transpile(&EmitOptions::default())
-      .expect("could not strip types");
-    assert!(code.contains("React.createElement(\"div\", null"));
-  }
-
-  #[test]
-  fn test_transpile_decorators() {
-    let specifier =
-      ModuleSpecifier::resolve_url_or_path("https://deno.land/x/mod.ts")
-        .expect("could not resolve specifier");
-    let source = r#"
-    function enumerable(value: boolean) {
-      return function (
-        _target: any,
-        _propertyKey: string,
-        descriptor: PropertyDescriptor,
-      ) {
-        descriptor.enumerable = value;
-      };
-    }
-    
-    export class A {
-      @enumerable(false)
-      a() {
-        Test.value;
-      }
-    }
-    "#;
-    let module = parse(specifier.as_str(), source, &MediaType::TypeScript)
-      .expect("could not parse module");
-    let (code, _) = module
-      .transpile(&EmitOptions::default())
-      .expect("could not strip types");
-    assert!(code.contains("_applyDecoratedDescriptor("));
   }
 }

@@ -1233,16 +1233,6 @@ fn permission_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
         .help("Allow file system write access"),
     )
     .arg(
-      Arg::with_name("allow-net")
-        .long("allow-net")
-        .min_values(0)
-        .takes_value(true)
-        .use_delimiter(true)
-        .require_equals(true)
-        .help("Allow network access")
-        .validator(crate::flags_allow_net::validator),
-    )
-    .arg(
       Arg::with_name("allow-env")
         .long("allow-env")
         .help("Allow environment access"),
@@ -1651,14 +1641,6 @@ fn permission_args_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   if let Some(write_wl) = matches.values_of("allow-write") {
     let write_allowlist: Vec<PathBuf> = write_wl.map(PathBuf::from).collect();
     flags.allow_write = Some(write_allowlist);
-  }
-
-  if let Some(net_wl) = matches.values_of("allow-net") {
-    let net_allowlist: Vec<String> =
-      crate::flags_allow_net::parse(net_wl.map(ToString::to_string).collect())
-        .unwrap();
-    flags.allow_net = Some(net_allowlist);
-    debug!("net allowlist: {:#?}", &flags.allow_net);
   }
 
   if matches.is_present("allow-env") {
